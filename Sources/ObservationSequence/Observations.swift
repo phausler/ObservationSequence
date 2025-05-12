@@ -39,11 +39,11 @@ func withIsolatedTaskCancellationHandler<T: Sendable>(
 
 /// An asychronous sequence generated from a closure that tracks the transactional changes of `@Observable` types.
 ///
-/// `Observed` conforms to `AsyncSequence`, providing a intutive and safe mechanism to track changes to
+/// `Observations` conforms to `AsyncSequence`, providing a intutive and safe mechanism to track changes to
 /// types that are marked as `@Observable` by using Swift Concurrency to indicate transactional boundaries
 /// starting from the willSet of the first mutation to the next suspension point of the safe access.
 @available(SwiftStdlib 9999, *)
-public struct Observed<Element: Sendable, Failure: Error>: AsyncSequence, Sendable {
+public struct Observations<Element: Sendable, Failure: Error>: AsyncSequence, Sendable {
   public enum Iteration: Sendable {
     case next(Element)
     case finish
@@ -61,7 +61,6 @@ public struct Observed<Element: Sendable, Failure: Error>: AsyncSequence, Sendab
       }
     }
     var id = 0
-    var tracking = false
     var continuations: [Int: Continuation] = [:]
     
     // create a generation id for the unique identification of the continuations
@@ -90,19 +89,6 @@ public struct Observed<Element: Sendable, Failure: Error>: AsyncSequence, Sendab
         }
         return continuation
       }?.resume()
-    }
-    
-    // this atomically transitions the observation from a not yet tracked state
-    // to a tracked state. No backwards transitions exist.
-    static func startTracking(_ state: _ManagedCriticalState<State>) -> Bool {
-      state.withCriticalRegion { state in
-        if !state.tracking {
-          state.tracking = true
-          return true
-        } else {
-          return false
-        }
-      }
     }
     
     // fire off ALL awaiting willChange continuations such that they are no
@@ -186,7 +172,7 @@ public struct Observed<Element: Sendable, Failure: Error>: AsyncSequence, Sendab
   ///     - emit: A closure to generate an element for the sequence.
   public static func untilFinished(
     @_inheritActorContext _ emit: @escaping @isolated(any) @Sendable () throws(Failure) -> Iteration
-  ) -> Observed<Element, Failure> {
+  ) -> Observations<Element, Failure> {
     .init(emit: .iteration(emit))
   }
   
@@ -196,6 +182,7 @@ public struct Observed<Element: Sendable, Failure: Error>: AsyncSequence, Sendab
     // 2) to idenitify the termination of _this_ sequence
     var state: _ManagedCriticalState<State>?
     let emit: Emit
+    var started = false
     
     // this is the primary implementation of the tracking
     // it is bound to be called on the specified isolation of the construction
@@ -250,9 +237,10 @@ public struct Observed<Element: Sendable, Failure: Error>: AsyncSequence, Sendab
       let id = State.generation(state)
       do {
         // there are two versions;
-        // either the tracking has never yet started at all and we need to prime the pump
+        // either the tracking has never yet started at all and we need to prime the pump for this specific iterator
         // or the tracking has already started and we are going to await a change
-        if State.startTracking(state) {
+        if !started {
+          started = true
           return try await trackEmission(isolation: iterationIsolation, state: state, id: id)
         } else {
           // wait for the willChange (and NOT the value itself)
