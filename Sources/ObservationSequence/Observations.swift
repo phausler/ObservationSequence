@@ -62,6 +62,7 @@ public struct Observations<Element: Sendable, Failure: Error>: AsyncSequence, Se
     }
     var id = 0
     var continuations: [Int: Continuation] = [:]
+    var dirty = false
     
     // create a generation id for the unique identification of the continuations
     // this allows the shared awaiting of the willSets.
@@ -95,6 +96,7 @@ public struct Observations<Element: Sendable, Failure: Error>: AsyncSequence, Se
     // longer pending.
     static func emitWillChange(_ state: _ManagedCriticalState<State>) {
       let continuations = state.withCriticalRegion { state in
+        state.dirty = true
         defer {
           state.continuations.removeAll()
         }
@@ -110,15 +112,21 @@ public struct Observations<Element: Sendable, Failure: Error>: AsyncSequence, Se
     static func willChange(isolation iterationIsolation: isolated (any Actor)? = #isolation, state: _ManagedCriticalState<State>, id: Int) async {
       return await withUnsafeContinuation(isolation: iterationIsolation) { continuation in
         state.withCriticalRegion { state in
-          // first check if a cancelled tombstone exists, remove it,
-          // and then return the freshly minted continuation to
-          // be immediately resumed
-          if case .cancelled = state.continuations[id] {
-            state.continuations[id] = nil
+          defer { state.dirty = false }
+          switch state.continuations[id] {
+          case .cancelled:
             return continuation as UnsafeContinuation<Void, Never>?
-          } else {
-            state.continuations[id] = .active(continuation)
-            return nil as UnsafeContinuation<Void, Never>?
+          case .active:
+            // the Iterator itself cannot be shared across isolations so any call to next that may share an id is a misbehavior
+            // or an internal book-keeping failure
+            fatalError("Iterator incorrectly shared across task isolations")
+          case .none:
+            if state.dirty {
+              return continuation
+            } else {
+              state.continuations[id] = .active(continuation)
+              return nil
+            }
           }
         }?.resume()
       }
