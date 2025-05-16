@@ -96,7 +96,12 @@ public struct Observations<Element: Sendable, Failure: Error>: AsyncSequence, Se
     // longer pending.
     static func emitWillChange(_ state: _ManagedCriticalState<State>) {
       let continuations = state.withCriticalRegion { state in
-        state.dirty = true
+        // if there are no continuations present then we have to set the state as dirty
+        // else if this is uncondiitonally set the state might produce duplicate events
+        // one for the dirty and one for the continuation.
+        if state.continuations.count == 0 {
+          state.dirty = true
+        }
         defer {
           state.continuations.removeAll()
         }
@@ -112,7 +117,9 @@ public struct Observations<Element: Sendable, Failure: Error>: AsyncSequence, Se
     static func willChange(isolation iterationIsolation: isolated (any Actor)? = #isolation, state: _ManagedCriticalState<State>, id: Int) async {
       return await withUnsafeContinuation(isolation: iterationIsolation) { continuation in
         state.withCriticalRegion { state in
-          defer { state.dirty = false }
+          defer {
+            state.dirty = false
+          }
           switch state.continuations[id] {
           case .cancelled:
             return continuation as UnsafeContinuation<Void, Never>?
